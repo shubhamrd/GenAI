@@ -7,217 +7,184 @@ This guide walks you through building a fully serverless web application that us
 ![Architecture Diagram](images/log-analyzer-arch.png)
 
 
-**Phase 1: IAM Role & Permissions**
+### **Phase 1: IAM Role & Permissions**
 
 Before creating the Lambda function, it needs an IAM Role with a specific inline policy to invoke Amazon Bedrock and write logs to CloudWatch.
 
-Go to the IAM Console -> Roles -> Create role.
+1. Go to the IAM Console → Roles → Create role.
+2. Select AWS service → Lambda → click **Next**.
+3. Do not select any policies on this screen. Click **Next**.
+4. Role name: `LogAnalyzerLambdaRole`. Click **Create role**.
+5. Find and click on your new `LogAnalyzerLambdaRole` in the list to open it.
+6. Under the **Permissions** tab, click **Add permissions** → **Create inline policy**.
+7. Switch to the **JSON** tab and paste the following strict policy:
 
-Select AWS service -> Lambda -> click Next.
+   ```json
+   {
+   	"Version": "2012-10-17",
+   	"Statement": [
+   		{
+   			"Sid": "BedrockInvokePermission",
+   			"Effect": "Allow",
+   			"Action": "bedrock:InvokeModel",
+   			"Resource": "*"
+   		},
+   		{
+   			"Sid": "CloudWatchLoggingPermissions",
+   			"Effect": "Allow",
+   			"Action": [
+   				"logs:CreateLogGroup",
+   				"logs:CreateLogStream",
+   				"logs:PutLogEvents"
+   			],
+   			"Resource": "arn:aws:logs:*:*:*"
+   		}
+   	]
+   }
+   ```
 
-Do not select any policies on this screen. Click Next.
+8. Click **Next**, name the policy `BedrockAndCloudWatchAccess`, and click **Create policy**.
 
-Role name: LogAnalyzerLambdaRole. Click Create role.
+### **Phase 2: The AI Engine (AWS Lambda)**
 
-Find and click on your new LogAnalyzerLambdaRole in the list to open it.
+1. Go to the AWS Lambda Console → Create function.
+2. Choose **Author from scratch**.
+3. Function name: `DevOpsLogAnalyzerEngine`
+4. Runtime: Python 3.12 (or latest)
+5. Execution role: Select **"Use an existing role"** and choose `LogAnalyzerLambdaRole`.
+6. Click **Create function**.
+7. In the **Code source** editor, paste the following Python code. This formats the prompt and calls Amazon Bedrock.
 
-Under the Permissions tab, click Add permissions -> Create inline policy.
+   ```python
+   import json
+   import boto3
+   import os
+   import re
 
-Switch to the JSON tab and paste the following strict policy:
+   REG_NAME = os.environ.get("AWS_REGION", "us-east-1")
 
-```json
-{
-	"Version": "2012-10-17",
-	"Statement": [
-		{
-			"Sid": "BedrockInvokePermission",
-			"Effect": "Allow",
-			"Action": "bedrock:InvokeModel",
-			"Resource": "*"
-		},
-		{
-			"Sid": "CloudWatchLoggingPermissions",
-			"Effect": "Allow",
-			"Action": [
-				"logs:CreateLogGroup",
-				"logs:CreateLogStream",
-				"logs:PutLogEvents"
-			],
-			"Resource": "arn:aws:logs:*:*:*"
-		}
-	]
-}
-```
+   # Switched to Amazon Nova Lite (Using the required Cross-Region prefix)
+   MODEL_ID = "us.amazon.nova-lite-v1:0" 
+   bedrock_runtime = boto3.client("bedrock-runtime", region_name=REG_NAME)
 
+   def lambda_handler(event, context):
+       try:
+           # Extract payload safely
+           body = event.get("body", "") if isinstance(event, dict) else event
+           if not body:
+               body = event
+               
+           if isinstance(body, str):
+               try:
+                   data = json.loads(body)
+                   raw_log = data.get("log", body)
+               except json.JSONDecodeError:
+                   raw_log = body
+           else:
+               raw_log = body.get("log", str(body))
 
-Click Next, name the policy BedrockAndCloudWatchAccess, and click Create policy.
+           # Nova responds very well to strict system instructions
+           system_instruction = (
+               "You are an expert DevOps engineer. Analyze the log. "
+               "Output ONLY valid JSON. "
+               "Schema: {\"error_summary\": \"...\", \"root_cause\": \"...\", \"remediation_steps\": [\"...\", \"...\"]}"
+           )
 
-**Phase 2: The AI Engine (AWS Lambda)**
+           messages = [{"role": "user", "content": [{"text": f"Analyze this log:\n{raw_log}"}]}]
 
-Go to the AWS Lambda Console -> Create function.
+           # Invoke Bedrock using the Converse API
+           response = bedrock_runtime.converse(
+               modelId=MODEL_ID,
+               messages=messages,
+               system=[{"text": system_instruction}],
+               inferenceConfig={
+                   "maxTokens": 500, 
+                   "temperature": 0.1, 
+                   "topP": 0.9
+               }
+           )
 
-Choose Author from scratch.
+           ai_response_text = response['output']['message']['content'][0]['text']
+           
+           # BULLETPROOF JSON EXTRACTION
+           json_match = re.search(r'\{.*\}', ai_response_text, re.DOTALL)
+           
+           if not json_match:
+               raise ValueError(f"No JSON found in model output. Raw output was: {ai_response_text}")
+               
+           clean_json_string = json_match.group(0)
+           parsed_json = json.loads(clean_json_string)
 
-Function name: DevOpsLogAnalyzerEngine
+           return {
+               "statusCode": 200,
+               "headers": {
+                   "Content-Type": "application/json",
+                   "Access-Control-Allow-Origin": "*",
+                   "Access-Control-Allow-Headers": "Content-Type"
+               },
+               "body": json.dumps(parsed_json)
+           }
 
-Runtime: Python 3.12 (or latest)
+       except Exception as e:
+           print(f"System Failure: {str(e)}")
+           return {
+               "statusCode": 500,
+               "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
+               "body": json.dumps({"error": "Failed to parse log entry", "details": str(e)})
+           }
+   ```
 
-Execution role: Select "Use an existing role" and choose LogAnalyzerLambdaRole.
+8. Click **Deploy** to save the code.
+9. Go to the **Configuration** tab → **General configuration** → **Edit**. Increase the **Timeout** to 45 seconds. Click **Save**.
 
-Click Create function.
-
-In the Code source editor, paste the following Python code. This formats the prompt and calls Amazon Bedrock.
-
-import json
-import boto3
-import os
-import re
-
-REG_NAME = os.environ.get("AWS_REGION", "us-east-1")
-
-# Switched to Amazon Nova Lite (Using the required Cross-Region prefix)
-MODEL_ID = "us.amazon.nova-lite-v1:0" 
-bedrock_runtime = boto3.client("bedrock-runtime", region_name=REG_NAME)
-
-def lambda_handler(event, context):
-    try:
-        # Extract payload safely
-        body = event.get("body", "") if isinstance(event, dict) else event
-        if not body:
-            body = event
-            
-        if isinstance(body, str):
-            try:
-                data = json.loads(body)
-                raw_log = data.get("log", body)
-            except json.JSONDecodeError:
-                raw_log = body
-        else:
-            raw_log = body.get("log", str(body))
-
-        # Nova responds very well to strict system instructions
-        system_instruction = (
-            "You are an expert DevOps engineer. Analyze the log. "
-            "Output ONLY valid JSON. "
-            "Schema: {\"error_summary\": \"...\", \"root_cause\": \"...\", \"remediation_steps\": [\"...\", \"...\"]}"
-        )
-
-        messages = [{"role": "user", "content": [{"text": f"Analyze this log:\n{raw_log}"}]}]
-
-        # Invoke Bedrock using the Converse API
-        response = bedrock_runtime.converse(
-            modelId=MODEL_ID,
-            messages=messages,
-            system=[{"text": system_instruction}],
-            inferenceConfig={
-                "maxTokens": 500, 
-                "temperature": 0.1, 
-                "topP": 0.9
-            }
-        )
-
-        ai_response_text = response['output']['message']['content'][0]['text']
-        
-        # BULLETPROOF JSON EXTRACTION
-        json_match = re.search(r'\{.*\}', ai_response_text, re.DOTALL)
-        
-        if not json_match:
-            raise ValueError(f"No JSON found in model output. Raw output was: {ai_response_text}")
-            
-        clean_json_string = json_match.group(0)
-        parsed_json = json.loads(clean_json_string)
-
-        return {
-            "statusCode": 200,
-            "headers": {
-                "Content-Type": "application/json",
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Headers": "Content-Type"
-            },
-            "body": json.dumps(parsed_json)
-        }
-
-    except Exception as e:
-        print(f"System Failure: {str(e)}")
-        return {
-            "statusCode": 500,
-            "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
-            "body": json.dumps({"error": "Failed to parse log entry", "details": str(e)})
-        }
-
-Click Deploy to save the code.
-
-Go to the Configuration tab -> General configuration -> Edit. Increase the Timeout to 45 seconds. Click Save.
-
-**Phase 3: Secure API Gateway (API Key Method)**
+### **Phase 3: Secure API Gateway (API Key Method)**
 
 We need a front door to our Lambda function, secured so that only authorized users (our web app) can trigger it.
 
-**Step 1: Create the API and Resource**
+#### **Step 3.1: Create the API and Resource**
 
-Navigate to the Amazon API Gateway Console -> Create API.
+1. Navigate to the Amazon API Gateway Console → Create API.
+2. Select **REST API** (Not Private) and click **Build**.
+3. Name it `LogAnalyzerSecureGateway` and click **Create API**.
+4. Click **Create resource**, set the path to `analyze`, and click **Create resource**.
 
-Select REST API (Not Private) and click Build.
+#### **Step 3.2: Create the POST Method**
 
-Name it LogAnalyzerSecureGateway and click Create API.
+1. Select the `/analyze` resource and click **Create method**.
+2. Method type: **POST**
+3. Integration type: **Lambda function**
+4. Lambda proxy integration: Toggle to **ON** (Critical).
+5. Lambda function: Select `DevOpsLogAnalyzerEngine`.
+6. Click **Create method**.
 
-Click Create resource, set the path to analyze, and click Create resource.
+#### **Step 3.3: Enable CORS**
 
-**Step 2: Create the POST Method**
+1. Select the `/analyze` resource.
+2. Click **Enable CORS**.
+3. Check the boxes for **POST** and **OPTIONS**.
+4. Click **Save**.
 
-Select the /analyze resource and click Create method.
+#### **Step 3.4: Require an API Key**
 
-Method type: POST
+1. Click on the **POST** method under `/analyze`.
+2. Go to **Method Request**.
+3. Set **API Key Required** to **true**.
 
-Integration type: Lambda function
+#### **Step 3.5: Deploy the API**
 
-Lambda proxy integration: Toggle to ON (Critical).
+1. Click the **Deploy API** button.
+2. Create a new stage named `prod`.
+3. Click **Deploy**. (Note your Invoke URL, e.g., `https://i622komjy7.execute-api.us-east-1.amazonaws.com/prod`)
 
-Lambda function: Select DevOpsLogAnalyzerEngine.
+#### **Step 3.6: Create Usage Plan & Associate the Key**
 
-Click Create method.
-
-**Step 3: Enable CORS**
-
-Select the /analyze resource.
-
-Click Enable CORS.
-
-Check the boxes for POST and OPTIONS.
-
-Click Save.
-
-**Step 4: Require an API Key**
-
-Click on the POST method under /analyze.
-
-Go to Method Request.
-
-Set API Key Required to true.
-
-**Step 5: Deploy the API**
-
-Click the Deploy API button.
-
-Create a new stage named prod.
-
-Click Deploy. (Note your Invoke URL, e.g., https://i622komjy7.execute-api.us-east-1.amazonaws.com/prod)
-
-**Step 6: Create Usage Plan & Associate the Key**
-
-In the left menu, click Usage Plans -> Create usage plan.
-
-Name: LogAnalyzerPlan
-
-Rate: 10, Burst: 5, Quota: 1000 per Month. Click Next.
-
-Associated API Stages: Click Add API Stage. Select your API and the prod stage. Click Next.
-
-Usage Plan API Keys: Click Add API Key to Usage Plan -> Create an API Key.
-
-Name it DemoKey, click Save, then click Done.
-
-Navigate to API Keys in the left menu, click your key, click Show, and copy the API Key string.
+1. In the left menu, click **Usage Plans** → **Create usage plan**.
+2. Name: `LogAnalyzerPlan`
+3. Rate: `10`, Burst: `5`, Quota: `1000` per Month. Click **Next**.
+4. Associated API Stages: Click **Add API Stage**. Select your API and the `prod` stage. Click **Next**.
+5. Usage Plan API Keys: Click **Add API Key to Usage Plan** → **Create an API Key**.
+6. Name it `DemoKey`, click **Save**, then click **Done**.
+7. Navigate to **API Keys** in the left menu, click your key, click **Show**, and copy the API Key string.
 
 > **⚠️ CRITICAL: Redeploy Your API**
 > 
@@ -225,52 +192,33 @@ Navigate to API Keys in the left menu, click your key, click Show, and copy the 
 > 
 > After creating the Usage Plan and API Key, go back to your API → Resources → **Deploy API** again to ensure the Usage Plan association is fully propagated to the prod stage.
 
-🔍 Checkpoint 3: Network Security Testing
+### **Checkpoint 3.7: Network Security Testing**
 
-Run this in Git Bash to test your secured endpoint (replace the URL and API key with your own):
+1. Run this in Git Bash to test your secured endpoint (replace the URL and API key with your own):
 
-Replace `YOUR_API_ENDPOINT` and `YOUR_API_KEY` with your actual values.
+   Replace `YOUR_API_ENDPOINT` and `YOUR_API_KEY` with your actual values.
 
-```bash
-curl -X POST YOUR_API_ENDPOINT \
-  -H "Content-Type: application/json" \
-  -H "x-api-key: YOUR_API_KEY" \
-  -d '{"log": "FATAL: OutOfMemoryError Java heap space"}'
-```
+   ```bash
+   curl -X POST YOUR_API_ENDPOINT \
+     -H "Content-Type: application/json" \
+     -H "x-api-key: YOUR_API_KEY" \
+     -d '{"log": "FATAL: OutOfMemoryError Java heap space"}'
+   ```
 
-
-**Phase 4: Deploy the Secure Web Interface (Amazon S3)**
+### **Phase 4: Deploy the Secure Web Interface (Amazon S3)**
 
 We will host a single HTML file on a fully private S3 bucket and access it via a temporary session URL.
 
-**Step 1: Create the S3 Bucket**
+#### **Step 4.1: Create the S3 Bucket**
 
-Open the Amazon S3 Console -> Create bucket.
+1. Open the Amazon S3 Console → Create bucket.
+2. Provide a unique name (e.g., `devops-demo-ui-123`).
+3. Leave **Block all public access** turned ON (The bucket stays strictly private).
+4. Click **Create bucket**.
 
-Provide a unique name (e.g., devops-demo-ui-123).
+#### **Step 4.2: Create the HTML File**
 
-Leave Block all public access turned ON (The bucket stays strictly private).
-
-Click Create bucket.
-
-Step 2: Create the HTML File
-
-Create a file on your computer named `index.html`. Paste the code below.
-
-> **⚠️ IMPORTANT: Configure API Credentials Before Uploading**
-> 
-> In the `<script>` section of the HTML code below, you'll find two variables that need to be updated:
-> 
-> ```javascript
-> const API_ENDPOINT = "YOUR_API_ENDPOINT_HERE"; // ✏️ REPLACE WITH YOUR API GATEWAY URL
-> const API_KEY = "YOUR_API_KEY_HERE"; // ✏️ REPLACE WITH YOUR API KEY
-> ```
-> 
-> **To find these values:**
-> - **API Endpoint**: Go to API Gateway → Stages → Select your stage → Copy the invoke URL
-> - **API Key**: Go to API Gateway → Usage Plans → Select your plan → Show API Key
-> 
-> **Failure to update these values will cause connection errors** when users try to analyze logs.
+1. Create a file on your computer named `index.html`. Paste the code below.
 
 > **⚠️ IMPORTANT: Configure API Credentials Before Uploading**
 > 
@@ -646,17 +594,3 @@ Create a file on your computer named `index.html`. Paste the code below.
 </body>
 
 </html>
-
-
-**Step 3: Upload & Generate Session URL**
-
-Upload index.html to your S3 bucket.
-
-Open your local terminal (Git Bash, etc.) and run the following command to generate a 12-hour session URL:
-
-aws s3 presign s3://YOUR_BUCKET_NAME_HERE/index.html --expires-in 43200
-
-
-Copy the long URL generated in the terminal and paste it into your browser.
-
-Click Load Demo Log and then Run Diagnostics!
