@@ -609,3 +609,5 @@ We will host a single HTML file on a fully private S3 bucket and access it via a
 
 3. Copy the long URL generated in the terminal and paste it into your browser.
 4. Click **Load Demo Log** and then **Run Diagnostics**!
+
+![Log Analyzer Web Interface](images/log-analyzer-web.png)
