@@ -235,17 +235,6 @@ We will host a single HTML file on a fully private S3 bucket and access it via a
 > 
 > **Failure to update these values will cause connection errors** when users try to analyze logs.
 
-#### **Step 4.3: Upload & Generate Session URL**
-
-1. Upload `index.html` to your S3 bucket.
-2. Open your local terminal (Git Bash, etc.) and run the following command to generate a 12-hour session URL:
-
-   ```bash
-   aws s3 presign s3://YOUR_BUCKET_NAME_HERE/index.html --expires-in 43200
-   ```
-
-3. Copy the long URL generated in the terminal and paste it into your browser.
-4. Click **Load Demo Log** and then **Run Diagnostics**!
 
 ```html
 <!DOCTYPE html>
@@ -608,3 +597,15 @@ We will host a single HTML file on a fully private S3 bucket and access it via a
 
 
 ```</html>
+
+#### **Step 4.3: Upload & Generate Session URL**
+
+1. Upload `index.html` to your S3 bucket.
+2. Open your local terminal (Git Bash, etc.) and run the following command to generate a 12-hour session URL:
+
+   ```bash
+   aws s3 presign s3://YOUR_BUCKET_NAME_HERE/index.html --expires-in 43200
+   ```
+
+3. Copy the long URL generated in the terminal and paste it into your browser.
+4. Click **Load Demo Log** and then **Run Diagnostics**!
