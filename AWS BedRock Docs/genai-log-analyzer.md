@@ -25,6 +25,7 @@ Under the Permissions tab, click Add permissions -> Create inline policy.
 
 Switch to the JSON tab and paste the following strict policy:
 
+```json
 {
 	"Version": "2012-10-17",
 	"Statement": [
@@ -46,6 +47,7 @@ Switch to the JSON tab and paste the following strict policy:
 		}
 	]
 }
+```
 
 
 Click Next, name the policy BedrockAndCloudWatchAccess, and click Create policy.
